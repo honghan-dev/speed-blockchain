@@ -22,7 +22,8 @@ pub trait SpeedBlockchainRpc {
         from: String,
         to: String,
         amount: u64,
-        fee: u64,
+        gas_limit: u64,
+        gas_price: u64,
     ) -> RpcResult<String>;
 }
 
@@ -59,13 +60,14 @@ impl SpeedBlockchainRpcServer for SpeedRpcImpl {
         from: String,
         to: String,
         amount: u64,
-        fee: u64,
+        gas_limit: u64,
+        gas_price: u64,
     ) -> RpcResult<String> {
         let mut chain = self.speed_blockchain.lock().await;
 
         // Create a transaction and add it to the mempool
         let tx = chain
-            .create_transaction(from, to, amount, fee)
+            .create_transaction(from, to, amount, gas_limit, gas_price)
             .await
             .map_err(error_to_rpc)?;
 

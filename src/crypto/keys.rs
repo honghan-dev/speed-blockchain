@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use super::SignatureError;
 use alloy::primitives::{Address, B256, keccak256};
 use alloy_signer::{Signature, Signer};
@@ -19,7 +17,7 @@ impl KeyPair {
         // 1. Generates cryptographically secure random private key
         // 2. Derives public key using secp256k1 elliptic curve
         // 3. Creates Ethereum address from public key hash
-        let seed = keccak256("testing");
+        let seed = keccak256(&name);
         let signer = PrivateKeySigner::from_bytes(&seed).unwrap();
         let address = signer.address(); // This is the CORRECT Ethereum address!
 

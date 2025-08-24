@@ -1,6 +1,6 @@
 use crate::blockchain::Transaction;
 use crate::crypto::{KeyPair, SignatureError};
-use alloy::primitives::{Address, B256};
+use alloy::primitives::B256;
 use alloy_signer::Signature;
 use anyhow::{Result, anyhow};
 use hex;
@@ -11,7 +11,6 @@ pub struct Mempool {
     // Core storage - just the essentials
     // tx_hash, B32 -> Transaction
     transactions: HashMap<B256, Transaction>,
-    address_nonces: HashMap<Address, u64>, // Track nonces per address
     // Maximum number of transaction
     max_size: usize,
 }
@@ -21,13 +20,16 @@ impl Mempool {
     pub fn new(max_size: usize) -> Self {
         Self {
             transactions: HashMap::new(),
-            address_nonces: HashMap::new(),
             max_size,
         }
     }
 
     // Add a transaction to the mempool
-    pub fn add_transaction(&mut self, transaction: Transaction, keypair: &KeyPair) -> Result<B256> {
+    pub fn add_transaction(
+        &mut self,
+        transaction: &Transaction,
+        keypair: &KeyPair,
+    ) -> Result<B256> {
         // STEP 1: Get transaction hash, because hash is optional
         let tx_hash = transaction
             .hash
@@ -36,6 +38,8 @@ impl Mempool {
         let signature = transaction
             .signature
             .ok_or_else(|| anyhow!("Transaction has no hash"))?;
+
+        self.replace_transaction_by_fee(&transaction)?;
 
         // STEP 2: Check if transaction already exists
         if self.transactions.contains_key(&tx_hash) {
@@ -58,13 +62,37 @@ impl Mempool {
 
         // Add to mempool
         // insert consumes the transaction
-        self.transactions.insert(tx_hash, transaction); // consumes the value
+        self.transactions.insert(tx_hash, transaction.clone()); // consumes the value
 
         println!(
             "✅ Transaction {} added to mempool",
             hex::encode(&tx_hash[..8])
         );
         Ok(tx_hash)
+    }
+
+    // replace existing transaction by fee
+    fn replace_transaction_by_fee(&mut self, transaction: &Transaction) -> Result<()> {
+        if let Some(existing) = self
+            .transactions
+            .values()
+            .find(|t| t.from == transaction.from && t.nonce == transaction.nonce)
+        {
+            if transaction.gas_price > existing.gas_price {
+                println!(
+                    "⚡ Replacing tx from {} with nonce {} (new fee {} > old fee {})",
+                    transaction.from, transaction.nonce, transaction.gas_price, existing.gas_price
+                );
+                let old_hash = existing.hash.unwrap();
+                self.transactions.remove(&old_hash);
+            } else {
+                println!(
+                    "❌ Duplicate nonce tx rejected (fee {} <= existing fee {})",
+                    transaction.gas_price, existing.gas_price
+                );
+            }
+        }
+        Ok(())
     }
 
     // helper function to get transaction hash
@@ -110,8 +138,8 @@ impl Mempool {
             return Err(anyhow!("Transaction amount cannot be negative"));
         }
 
-        if transaction.fee < 0 {
-            return Err(anyhow!("Transaction fee cannot be negative"));
+        if transaction.gas_price < 0 {
+            return Err(anyhow!("Transaction gas price cannot be negative"));
         }
 
         if transaction.from.is_empty() || transaction.to.is_empty() {

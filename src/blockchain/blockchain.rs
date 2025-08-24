@@ -1,31 +1,83 @@
-use alloy::primitives::B256;
-use anyhow::{Context, Ok, Result, anyhow};
+use alloy::primitives::{Address, B256};
+use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::block::Block;
 use super::transaction::Transaction;
-use crate::KeyPair;
 use crate::mempool::Mempool;
+use crate::state::StateTransition;
 use crate::storage::Storage;
+use crate::{GasConfig, KeyPair, State};
 
 #[derive(Clone)]
 pub struct Blockchain {
     store: Arc<Mutex<Storage>>, // RocksDB storage
     mempool: Arc<Mutex<Mempool>>,
+    pub state: Arc<Mutex<State>>,
     difficulty: usize,
+    gas_config: GasConfig,
 }
 
 impl Blockchain {
     // starting a new blockchain
     pub fn new(path: &str, difficulty: usize) -> Result<Self> {
         let store = Storage::new(path)?;
+        let state = State::new();
+        let gas_config = GasConfig::default();
 
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
+            state: Arc::new(Mutex::new(state)),
             difficulty,
             mempool: Arc::new(Mutex::new(Mempool::new(100))),
+            gas_config,
         })
+    }
+
+    // Simple helper to create and add transaction
+    pub async fn create_transaction(
+        &mut self,
+        from: String,
+        to: String,
+        amount: u64,
+        gas_limit: u64,
+        gas_price: u64,
+    ) -> Result<String> {
+        // Clone this because parse_checksummed takes ownership
+        let from_addr = from.clone();
+        let from_addr = Address::parse_checksummed(from_addr, None).unwrap();
+
+        // @todo //////// Basic signing /////////
+        // to remove once we have proper wallet
+        // This is a simplified example, in real blockchain, this would be done in the wallet
+        // create the transaction
+        let mut transaction = Transaction::new(from, to, amount, gas_limit, gas_price)
+            .map_err(|e| anyhow!("Failed to create transaction: {}", e))?;
+
+        // Get current nonce for the sender
+        {
+            let state = self.state.lock().await;
+            let current_nonce = state.get_nonce(&from_addr);
+
+            transaction.nonce = current_nonce; // Set correct nonce
+        } // dropping lock
+        // create a keypair for signing
+        let keypair = KeyPair::generate("default".to_string());
+
+        println!(
+            "🔑 Blockchain - Generated keypair for transaction: {}",
+            keypair.address
+        );
+
+        // sign the transaction
+        let signature = transaction.sign_hash(&keypair).await?;
+
+        transaction.signature = Some(signature);
+
+        // If valid, update the real state
+        let tx_id = self.add_transaction(transaction, &keypair).await?;
+        Ok(hex::encode(tx_id))
     }
 
     // Mine all pending transactions into a block
@@ -33,6 +85,26 @@ impl Blockchain {
         let mut mempool = self.mempool.lock().await;
         // Get all pending transactions
         let pending_transactions = mempool.get_all_transactions();
+
+        // execute transaction and update state
+        let mut valid_txs = vec![];
+        {
+            let mut state = self.state.lock().await;
+
+            for tx in pending_transactions.iter() {
+                let mut tx_copy = tx.clone();
+                match StateTransition::apply_transaction(&mut state, &mut tx_copy, &self.gas_config)
+                {
+                    Ok(_) => {
+                        valid_txs.push(tx.clone());
+                    }
+                    Err(e) => {
+                        println!("❌ Invalid transaction skipped: {}", e);
+                        continue;
+                    }
+                }
+            }
+        }
 
         println!(
             "🎯 Mining block with {} transactions...",
@@ -80,44 +152,6 @@ impl Blockchain {
         Ok(())
     }
 
-    // Simple helper to create and add transaction
-    pub async fn create_transaction(
-        &mut self,
-        from: String,
-        to: String,
-        amount: u64,
-        fee: u64,
-    ) -> Result<String> {
-        // @todo //////// Basic signing /////////
-        // to remove once we have proper wallet
-        // This is a simplified example, in real blockchain, this would be done in the wallet
-
-        // create a keypair for signing
-        let keypair = KeyPair::generate("default".to_string());
-
-        println!(
-            "🔑 Blockchain - Generated keypair for transaction: {}",
-            keypair.address
-        );
-
-        // create the transaction
-        let mut transaction = Transaction::new(from, to, amount, fee)
-            .map_err(|e| anyhow!("Failed to create transaction: {}", e))?;
-
-        println!(
-            "📝 Blockchain - Transaction hash to sign: {:?}",
-            transaction.hash
-        );
-
-        // sign the transaction
-        let signature = transaction.sign_hash(&keypair).await?;
-
-        transaction.signature = Some(signature);
-
-        let tx_id = self.add_transaction(transaction, &keypair).await?;
-        Ok(hex::encode(tx_id))
-    }
-
     // Add transaction to mempool (no balance checking)
     pub async fn add_transaction(
         &mut self,
@@ -125,7 +159,7 @@ impl Blockchain {
         keypair: &KeyPair,
     ) -> Result<B256> {
         let mut mempool = self.mempool.lock().await;
-        let tx_id = mempool.add_transaction(transaction, keypair)?;
+        let tx_id = mempool.add_transaction(&transaction, keypair)?;
         Ok(tx_id)
     }
 

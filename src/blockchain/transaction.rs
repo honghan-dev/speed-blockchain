@@ -1,4 +1,3 @@
-use rlp_derive::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 use std::{
     str::FromStr,
@@ -15,9 +14,13 @@ pub struct Transaction {
     pub from: Address,  // Sender address
     pub to: Address,    // Receiver address
     pub amount: U256,   // Amount to transfer
-    pub fee: U256,      // Transaction fee
     pub timestamp: u64, // When transaction was created
     pub nonce: u64,     // Nonce for transaction uniqueness
+
+    // GAS FIELDS
+    pub gas_limit: U256,
+    pub gas_price: U256,
+    pub gas_used: U256,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>, // Optional signature for the transaction
@@ -27,7 +30,13 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub fn new(from: String, to: String, amount: u64, fee: u64) -> Result<Self, String> {
+    pub fn new(
+        from: String,
+        to: String,
+        amount: u64,
+        gas_limit: u64,
+        gas_price: u64,
+    ) -> Result<Self, String> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -40,7 +49,9 @@ impl Transaction {
             from,
             to,
             amount: U256::from(amount),
-            fee: U256::from(fee),
+            gas_limit: U256::from(gas_limit),
+            gas_price: U256::from(gas_price),
+            gas_used: U256::from(0),
             timestamp,
             nonce: 0, // Default nonce
             signature: None,
@@ -64,7 +75,9 @@ impl Transaction {
         data.extend_from_slice(self.from.as_slice());
         data.extend_from_slice(self.to.as_slice());
         data.extend_from_slice(&self.amount.to_be_bytes::<32>());
-        data.extend_from_slice(&self.fee.to_be_bytes::<32>());
+        data.extend_from_slice(&self.gas_limit.to_be_bytes::<32>());
+        data.extend_from_slice(&self.gas_price.to_be_bytes::<32>());
+        data.extend_from_slice(&self.gas_used.to_be_bytes::<32>());
         data.extend_from_slice(&self.timestamp.to_be_bytes());
         data.extend_from_slice(&self.nonce.to_be_bytes());
 
@@ -82,5 +95,18 @@ impl Transaction {
         self.hash = Some(hash); // Ensure hash is set
 
         Ok(signature)
+    }
+
+    // Helper methods for gas calculations
+    pub fn max_transaction_cost(&self) -> U256 {
+        self.amount + (self.gas_limit * self.gas_price)
+    }
+
+    pub fn actual_gas_fee(&self) -> U256 {
+        self.gas_used * self.gas_price
+    }
+
+    pub fn gas_refund(&self) -> U256 {
+        (self.gas_limit - self.gas_used) * self.gas_price
     }
 }
