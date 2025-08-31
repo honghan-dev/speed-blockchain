@@ -19,10 +19,6 @@ fn ether_to_wei(ether: u64) -> U256 {
     U256::from(ether) * U256::from(10_u64.pow(18)) // 1 ETH = 10^18 wei
 }
 
-fn gwei_to_wei(gwei: u64) -> U256 {
-    U256::from(gwei) * U256::from(10_u64.pow(9)) // 1 gwei = 10^9 wei
-}
-
 #[tokio::test]
 async fn test_blockchain_integration() -> Result<()> {
     // create a keypair for signing

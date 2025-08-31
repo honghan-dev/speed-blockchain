@@ -1,5 +1,6 @@
 pub mod account;
 pub mod blockchain;
+pub mod consensus;
 pub mod crypto;
 pub mod gas;
 pub mod mempool;
@@ -11,6 +12,7 @@ pub mod storage;
 // Re-export commonly used types for convenience
 pub use account::Account;
 pub use blockchain::{Block, Blockchain, Transaction};
+pub use consensus::Validator;
 pub use crypto::{KeyPair, SignatureError};
 pub use gas::{GasCalculator, GasConfig};
 pub use mempool::Mempool;
