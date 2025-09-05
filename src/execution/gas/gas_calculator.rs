@@ -7,11 +7,12 @@ impl GasCalculator {
     // calculate gas cost execution the calldata
     // this is a hardcoded gas amount, because no smart contract opcode calculation yet
     pub fn calculate_instrinsic_gas(config: &GasConfig) -> U256 {
-        let mut gas = config.intrinsic_gas;
+        // let mut gas = config.intrinsic_gas;
 
-        gas += config.gas_per_byte * U256::from(40);
+        // gas += config.gas_per_byte * U256::from(40);
 
-        gas
+        // gas
+        U256::from(21000)
     }
 
     // validate gas price is valid

@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct State {
+pub struct StateManager {
     pub accounts: HashMap<Address, Account>,
     pub state_root: B256,
 }
 
-impl State {
+impl StateManager {
     // Initial state with empty accounts and zero state root
     pub fn new() -> Self {
         Self {
@@ -37,6 +37,7 @@ impl State {
         self.calculate_state_root();
     }
 
+    // Calculate state root, using simple hash, NOT an actual state root
     fn calculate_state_root(&mut self) {
         // Simple state root calculation by hashing concatenated account data
         let mut data = Vec::new();
@@ -78,7 +79,7 @@ impl State {
         self.accounts.len()
     }
 
-    /// Fund account (for testing)
+    /// TESTING Fund account (for testing)
     pub fn fund_account(&mut self, address: &Address, amount: U256) {
         let mut account = self.get_account(&address);
         account.balance += amount;

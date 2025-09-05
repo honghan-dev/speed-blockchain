@@ -16,4 +16,6 @@ pub enum SignatureError {
     HexDecode(#[from] hex::FromHexError),
     #[error("ECDSA error: {0}")]
     EcdsaError(String),
+    #[error("Invalid message hash")]
+    HashMismatch,
 }

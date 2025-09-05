@@ -44,3 +44,15 @@ impl fmt::Display for StateTransitionError {
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecutionError {
+    #[error("Transaction failed: {0}")]
+    TxFailed(String),
+    #[error("Insufficient gas: required {required}, available {available}")]
+    InsufficientGas { required: U256, available: U256 },
+    #[error("State error: {0}")]
+    StateError(String),
+    #[error("Invalid transaction: {0}")]
+    InvalidTransaction(String),
+}

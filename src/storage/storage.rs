@@ -4,6 +4,10 @@ use rocksdb::{DB, Options};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::Block;
+
+// persist blocks + state
+
 pub struct Storage {
     db: DB,
 }
@@ -120,5 +124,20 @@ impl Storage {
             }
             None => Ok(None),
         }
+    }
+
+    // Helper method
+    // Store block with all necessary indices
+    pub fn store_block(&self, block: &Block) -> Result<()> {
+        // Store block data
+        self.put_block_hash_to_block(&block.header.hash(), block)?;
+
+        // Store index mapping
+        self.put_index_to_block_hash(&block.header.index, &block.header.hash())?;
+
+        // Update last index
+        self.put_last_index(&block.header.index)?;
+
+        Ok(())
     }
 }

@@ -1,15 +1,18 @@
-use super::error::StateTransitionError;
-use crate::{GasCalculator, GasConfig, State, Transaction};
+use crate::error::StateTransitionError;
+use crate::{GasCalculator, GasConfig, StateManager, Transaction};
+use alloy::primitives::U256;
 use anyhow::Result;
 
 pub struct StateTransition;
 
+// execution layer
+
 impl StateTransition {
     pub fn apply_transaction(
-        state: &mut State,
+        state: &mut StateManager,
         tx: &mut Transaction,
         config: &GasConfig,
-    ) -> Result<(), StateTransitionError> {
+    ) -> Result<U256, StateTransitionError> {
         println!(
             "🔄 Processing: {} → {}, amount: {}, gas_limit: {}, gas_price: {}",
             tx.from, tx.to, tx.amount, tx.gas_limit, tx.gas_price
@@ -78,12 +81,15 @@ impl StateTransition {
             return Err(StateTransitionError::BalanceOverflow);
         }
 
-        tx.gas_used = intrinsic_gas;
-        let total_cost = tx.amount + tx.actual_gas_fee();
+        let gas_used = intrinsic_gas;
+        let gas_cost = gas_used * tx.gas_price;
+        let total_cost = tx.amount + gas_cost;
 
         // STEP 4: Apply state changes
         sender.nonce += 1;
+        // deduct total cost from sender
         sender.balance = sender.balance.checked_sub(total_cost).unwrap();
+        // add amount to recipient
         recipient.balance = recipient.balance.checked_add(tx.amount).unwrap();
 
         println!(
@@ -99,6 +105,6 @@ impl StateTransition {
             hex::encode(state.get_state_root())
         );
 
-        Ok(())
+        Ok(gas_used)
     }
 }

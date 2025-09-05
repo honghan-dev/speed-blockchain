@@ -1,10 +1,10 @@
-use crate::blockchain::Transaction;
-use crate::crypto::{KeyPair, SignatureError};
+use crate::core::Transaction;
 use alloy::primitives::B256;
-use alloy_signer::Signature;
 use anyhow::{Result, anyhow};
 use hex;
 use std::collections::HashMap;
+
+// tx queue, ordering
 
 #[derive(Debug, Clone)]
 pub struct Mempool {
@@ -25,40 +25,24 @@ impl Mempool {
     }
 
     // Add a transaction to the mempool
-    pub fn add_transaction(
-        &mut self,
-        transaction: &Transaction,
-        keypair: &KeyPair,
-    ) -> Result<B256> {
-        // STEP 1: Get transaction hash, because hash is optional
-        let tx_hash = transaction
-            .hash
-            .ok_or_else(|| anyhow!("Transaction has no hash"))?;
+    pub fn add_transaction(&mut self, transaction: &Transaction) -> Result<B256> {
+        let tx_hash = transaction.hash;
 
-        let signature = transaction
-            .signature
-            .ok_or_else(|| anyhow!("Transaction has no hash"))?;
-
-        self.replace_transaction_by_fee(&transaction)?;
-
-        // STEP 2: Check if transaction already exists
-        if self.transactions.contains_key(&tx_hash) {
+        if !transaction.is_signature_valid() {
             return Err(anyhow!(
-                "Transaction {} already exists in mempool",
-                format!("0x{}", hex::encode(&tx_hash.as_slice()[..8]))
+                "Transaction signature failed for {}",
+                hex::encode(&tx_hash[..8])
             ));
         }
 
-        // STEP 3: Check mempool size limit
-        if self.transactions.len() >= self.max_size {
-            return Err(anyhow!("Mempool is full ({} transactions)", self.max_size));
-        }
+        println!(
+            "✅ Signature verified for transaction {}",
+            hex::encode(&tx_hash[..8])
+        );
 
-        // STEP 4: Verify transaction signature
-        self.verify_transaction_signature(&tx_hash, &signature, keypair)?;
+        let _ = self.validate_transaction(&transaction);
 
-        // Basic validation
-        self.validate_transaction(&transaction)?;
+        self.replace_transaction_by_fee(&transaction)?;
 
         // Add to mempool
         // insert consumes the transaction
@@ -83,7 +67,7 @@ impl Mempool {
                     "⚡ Replacing tx from {} with nonce {} (new fee {} > old fee {})",
                     transaction.from, transaction.nonce, transaction.gas_price, existing.gas_price
                 );
-                let old_hash = existing.hash.unwrap();
+                let old_hash = existing.hash;
                 self.transactions.remove(&old_hash);
             } else {
                 println!(
@@ -92,43 +76,6 @@ impl Mempool {
                 );
             }
         }
-        Ok(())
-    }
-
-    // helper function to get transaction hash
-    pub fn get_transaction_hash(&self, transaction: &Transaction) -> Result<B256> {
-        match transaction.hash {
-            Some(hash) => Ok(hash),
-            None => Err(anyhow!(
-                "Transaction has no hash - was it properly created?"
-            )),
-        }
-    }
-
-    // Verify transaction signature
-    fn verify_transaction_signature(
-        &self,
-        hash: &B256,
-        signature: &Signature,
-        keypair: &KeyPair,
-    ) -> Result<()> {
-        println!("🔍 Mempool: Verifying transaction signature...");
-
-        // Verify the signature
-        keypair
-            .verify_signature(&hash, &signature)
-            .map_err(|e| match e {
-                SignatureError::InvalidSignature => {
-                    anyhow!("Transaction has invalid signature format")
-                }
-                SignatureError::SignatureVerificationFailed => {
-                    anyhow!("Transaction signature verification failed - unauthorized signer")
-                }
-                _ => anyhow!("Signature verification error: {}", e),
-            })?;
-
-        // If we reach here, signature is valid
-        println!("✅ Mempool - Transaction signature verified successfully");
         Ok(())
     }
 

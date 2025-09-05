@@ -1,100 +1,142 @@
-use alloy::primitives::U256;
-use anyhow::Result;
-use speed_blockchain::{Blockchain, KeyPair};
-use tempfile::TempDir;
+#[cfg(test)]
+mod integration_test {
+    use alloy::primitives::{B256, U256};
+    use alloy_signer::Signature;
+    use anyhow::Result;
+    use speed_blockchain::{Blockchain, KeyPair, Transaction};
+    use std::str::FromStr;
+    use tokio;
 
-// Helper function to create a test blockchain with temporary storage
-fn create_test_blockchain() -> Result<(Blockchain, TempDir)> {
-    let temp_dir = TempDir::new()?;
-    let blockchain = Blockchain::new(temp_dir.path().to_str().unwrap(), 1)?; // Low difficulty for fast tests
-    Ok((blockchain, temp_dir))
-}
+    const DB_PATH: &str = "blockchain_db";
+    const TO_GWEI: u128 = 1_000_000_000;
+    const TO_ETH: u128 = 1_000_000_000_000_000_000;
 
-fn create_keypair(name: String) -> KeyPair {
-    KeyPair::generate(name)
-}
+    #[tokio::test]
+    async fn test_complete_block_production_flow() -> Result<()> {
+        println!("🧪 Starting complete block production integration test");
 
-// Helper functions for realistic amounts
-fn ether_to_wei(ether: u64) -> U256 {
-    U256::from(ether) * U256::from(10_u64.pow(18)) // 1 ETH = 10^18 wei
-}
+        let (blockchain, _) = setup_test_blockchain().await?;
 
-#[tokio::test]
-async fn test_blockchain_integration() -> Result<()> {
-    // create a keypair for signing
-    eprintln!("🧪 Testing complete transaction flow...");
+        let (alice, bob) = setup_test_accounts(&blockchain).await?;
 
-    let (blockchain, _temp_dir) = create_test_blockchain()?;
+        let transactions = create_test_transactions(&alice, &bob).await?;
 
-    // Create wallets
-    let alice = create_keypair("alice".to_string());
-    let bob = create_keypair("bob".to_string());
+        // add each transaction into the mempool
+        for tx in transactions {
+            blockchain.execution_engine.add_transaction(&tx).await?;
+        }
+        println!("✅ Added transactions to mempool");
 
-    {
-        // acquire state lock
-        let mut state = blockchain.state.lock().await;
+        // Step 5: Verify mempool state before block production
+        let pending = blockchain.execution_engine.get_pending_transactions().await;
+        assert!(!pending.is_empty(), "Mempool should contain transactions");
+        println!("Mempool contains {} transactions", pending.len());
 
-        eprintln!("💰 Funding accounts...");
-        state.fund_account(&alice.address, ether_to_wei(100));
+        // Step 6: Record initial state
+        let initial_alice_balance = {
+            let state = blockchain.execution_engine.state_manager.lock().await;
+            state.get_balance(&alice.address)
+        };
+        println!("Alice initial balance: {}", initial_alice_balance);
 
-        state.fund_account(&bob.address, ether_to_wei(100));
+        let produced_block = blockchain.produce_block().await?;
+        println!(
+            "Block produced successfully: #{}",
+            produced_block.header.index
+        );
 
-        let alice_initial = state.get_balance(&alice.address);
-        let bob_initial = state.get_balance(&bob.address);
-
-        // Check initial balances
-        assert_eq!(alice_initial, ether_to_wei(100));
-        assert_eq!(bob_initial, ether_to_wei(100));
+        Ok(())
     }
 
-    eprintln!("📤 Creating and processing transaction from Alice to Bob...");
-    let chain = &mut blockchain.clone();
+    // Setup blockchain
+    async fn setup_test_blockchain() -> Result<(Blockchain, KeyPair)> {
+        println!("🔧 Setting up test blockchain...");
 
-    // Transaction 1: Send 2 ETH (realistic personal transfer)
-    let tx1_amount = 2_000_000_000_000_000_000; // 2 ETH
-    let tx1_gas_limit = 21_000; // Standard ETH transfer
-    let tx1_gas_price = 20_000_000_000; // 20 gwei - typical gas price
+        // create validator keypair
+        let validator_keypair = KeyPair::generate("Validator".into());
+        let validator_stake = 10000u64;
 
-    let tx_hash = chain
-        .create_transaction(
-            alice.address.to_string(),
-            bob.address.to_string(),
-            tx1_amount,
-            tx1_gas_limit,
-            tx1_gas_price,
-        )
-        .await?;
-    eprintln!("✅ Transaction created with hash: {}", tx_hash);
+        let validators = vec![(validator_keypair.address, validator_stake)];
 
-    // Transaction 1: Send 2 ETH (realistic personal transfer)
-    let tx2_amount = 1_500_000_000_000_000_000; // 2 ETH
-    let tx2_gas_limit = 21_000; // Standard ETH transfer
-    let tx2_gas_price = 20_000_000_000; // 20 gwei - typical gas price
+        let blockchain = Blockchain::new(
+            DB_PATH,
+            1000, // min_stake
+            5,    // slot duration seconds
+            validators,
+            Some(validator_keypair.clone()),
+        )?;
 
-    let tx_hash = chain
-        .create_transaction(
-            alice.address.to_string(),
-            bob.address.to_string(),
-            tx2_amount,
-            tx2_gas_limit,
-            tx2_gas_price,
-        )
-        .await?;
+        println!(
+            "✅ Blockchain setup complete with validator: {}",
+            validator_keypair.address
+        );
 
-    eprintln!("✅ Transaction created with hash: {}", tx_hash);
-    chain.mine_pending_transactions().await?;
-
-    {
-        // acquire state lock
-        let state = blockchain.state.lock().await;
-
-        let alice_final = state.get_balance(&alice.address);
-        let bob_final = state.get_balance(&bob.address);
-        eprintln!("Alice final balance: {}", alice_final);
-        eprintln!("Bob final balance: {}", bob_final);
+        Ok((blockchain, validator_keypair))
     }
-    // Check final balances
-    // assert_eq!(alice_final, U256::from(500_000));
-    // assert_eq!(bob_final, U256::from(1_500_000));
-    Ok(())
+
+    // Setup and fund test account
+    async fn setup_test_accounts(blockchain: &Blockchain) -> Result<(KeyPair, KeyPair)> {
+        println!("💰 Setting up test accounts...");
+
+        let alice = KeyPair::generate("alice".into());
+        let bob = KeyPair::generate("bob".into());
+
+        // Fund Alice for transactions
+        let mut state_manager = blockchain.execution_engine.state_manager.lock().await;
+
+        // fund alice
+        state_manager.fund_account(&alice.address, U256::from(100 * TO_ETH));
+
+        println!("✅ Alice funded: {} | Bob: {}", alice.address, bob.address);
+        Ok((alice, bob))
+    }
+
+    // creates test transactions and sign it
+    async fn create_test_transactions(alice: &KeyPair, bob: &KeyPair) -> Result<Vec<Transaction>> {
+        println!("📝 Creating test transactions...");
+
+        let mut transactions = Vec::new();
+
+        let mut transaction = Transaction {
+            from: alice.address,
+            to: bob.address,
+            amount: U256::from(1 * TO_ETH),
+            timestamp: current_timestamp(),
+            nonce: 0,
+            gas_limit: U256::from(21000),
+            gas_price: U256::from(TO_GWEI), // 1gwei
+            signature: create_dummy_signature(),
+            hash: B256::ZERO,
+        };
+
+        let tx_hash = transaction.calculate_hash();
+
+        let signature = alice.sign_hash(&tx_hash).await?;
+
+        // Update transaction with signature and hash
+        transaction.signature = signature;
+        transaction.hash = tx_hash;
+
+        transactions.push(transaction);
+
+        println!("✅ Created test transactions");
+        Ok(transactions)
+    }
+
+    // helper method
+
+    // create current timestamp
+    fn current_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    // create a dummy signature before replacing it with an actual signature
+    fn create_dummy_signature() -> Signature {
+        return Signature::from_str(
+        "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        ).unwrap();
+    }
 }

@@ -1,5 +1,4 @@
-use alloy::primitives::{Address, B256, Sign, Signature, keccak256};
-use alloy_signer::k256::elliptic_curve::rand_core::block;
+use alloy::primitives::{Address, B256, Signature, keccak256};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,10 +22,6 @@ pub struct BlockHeader {
 
     // Ethereum-style signature (65 bytes: r + s + v)
     pub validator_signature: Option<Vec<u8>>,
-
-    // gas
-    pub gas_limit: u64,
-    pub gas_used: u64,
 }
 
 impl BlockHeader {
@@ -51,8 +46,8 @@ impl BlockHeader {
                 .unwrap()
                 .as_secs(),
             validator_signature: None,
-            gas_limit: 0,
-            gas_used: 0,
+            // gas_limit: 0,
+            // gas_used: 0,
         }
     }
 
@@ -74,8 +69,6 @@ impl BlockHeader {
         data.extend_from_slice(self.proposer.as_slice());
         data.extend_from_slice(self.transactions_root.as_slice());
         data.extend_from_slice(self.state_root.as_slice());
-        data.extend_from_slice(&self.gas_limit.to_be_bytes());
-        data.extend_from_slice(&self.gas_used.to_be_bytes());
 
         // NOTE: We don't include validator_signature in hash calculation
         // because the signature is OF the hash, not part of it
