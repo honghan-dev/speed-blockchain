@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{GasConfig, Mempool, Receipt, StateManager};
+use crate::StateTransition;
 use crate::core::{Block, Transaction};
-use crate::{StateTransition, state_manager};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
