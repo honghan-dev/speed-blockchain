@@ -6,6 +6,7 @@ pub mod execution;
 pub mod network;
 pub mod rpc;
 pub mod server;
+pub mod service;
 pub mod storage;
 
 // Re-export commonly used types for convenience
@@ -17,6 +18,7 @@ pub use execution::*;
 pub use rpc::SpeedRpcImpl;
 // pub use server::SpeedBlockchainServer;
 pub use network::*;
+pub use service::*;
 pub use storage::Storage;
 
 // Export anyhow::Result for convenience
