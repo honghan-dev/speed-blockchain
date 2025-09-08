@@ -4,7 +4,6 @@ use anyhow::Result;
 use std::net::SocketAddr;
 
 // Database path for RocksDB
-const DB_PATH: &str = "blockchain_db";
 const SERVER_ADDR: &str = "127.0.0.1:8545";
 
 fn print_banner() {

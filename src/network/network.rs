@@ -30,6 +30,9 @@ pub struct NetworkService {
     from_blockchain_receiver: UnboundedReceiver<BlockchainMessage>,
 }
 
+unsafe impl Send for NetworkService {}
+unsafe impl Sync for NetworkService {}
+
 impl NetworkService {
     // starting a new node instance
     pub async fn new(
