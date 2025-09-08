@@ -1,4 +1,5 @@
 use alloy::primitives::{Address, B256};
+use alloy_signer::Signature;
 use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -6,7 +7,7 @@ use tokio::sync::Mutex;
 use super::block::Block;
 use crate::consensus::{ConsensusEngine, ValidatorSet};
 use crate::storage::Storage;
-use crate::{ExecutionEngine, GasConfig, KeyPair};
+use crate::{BlockProcessResult, ExecutionEngine, KeyPair, Transaction};
 
 // chain manager: glue for consensus and execution engines
 
@@ -15,7 +16,6 @@ pub struct Blockchain {
     pub execution_engine: Arc<ExecutionEngine>,
     pub consensus_engine: Arc<Mutex<ConsensusEngine>>,
     store: Arc<Mutex<Storage>>, // RocksDB storage
-                                // gas_config: GasConfig,
 }
 
 impl Blockchain {
@@ -59,6 +59,14 @@ impl Blockchain {
 
     /// Produce new block if choosen as proposer
     pub async fn produce_block(&self) -> Result<Block> {
+        // check if this node has been choosen to propose block
+        let consensus = self.consensus_engine.lock().await;
+        let should_process = consensus.should_produce_block().await?;
+
+        if !should_process {
+            return Err(anyhow!("Not selected as proposer for current slot"));
+        }
+
         // 2. Get pending transactions
         let mut pending_txs = self.execution_engine.get_pending_transactions().await;
         if pending_txs.is_empty() {
@@ -104,25 +112,145 @@ impl Blockchain {
         Ok(finalized_block)
     }
 
-    /// Validate and add block from network
-    // pub async fn validate_block(&self, block: Block) -> Result<bool> {
-    //     // 1. Consensus validation
-    //     let consensus_valid = self.consensus_engine.validate_block(&block).await?;
-    //     if !consensus_valid {
-    //         return Ok(false);
-    //     }
+    // process and block received from the service(from other node)
+    pub async fn process_received_block(
+        &self,
+        block: Block,
+        proposer_id: Address,
+        signature: Signature,
+    ) -> Result<BlockProcessResult> {
+        println!(
+            "Blockchain: Processing received block {} from {}",
+            block.header.index, proposer_id
+        );
 
-    //     // 2. Execution validation
-    //     let mut block_copy = block.clone();
-    //     let execution_result = self.execution_engine.execute_block(&mut block_copy).await?;
+        let block_hash = block.header.hash();
 
-    //     // 4. Store and update
-    //     self.store_block(&block).await?;
-    //     self.execution_engine.finalize_block(&block).await?;
-    //     self.consensus_engine.update_best_block(&block).await?;
+        // Step 1: Verify signature first (quick check)
+        if !self.verify_proposer_signature(&block, &proposer_id, &signature)? {
+            println!("Blockchain: Invalid proposer signature");
+            return Ok(BlockProcessResult::Rejected(
+                block_hash,
+                "Invalid signature".to_string(),
+            ));
+        }
 
-    //     Ok(true)
-    // }
+        // Step 2: Full block validation
+        match self.validate_block(&block).await {
+            Ok(true) => {
+                // commit the validated block, in consensus and execution state
+                self.commit_validated_block(&block).await?;
+                println!("Blockchain: Block {} validation passed", block.header.index);
+                Ok(BlockProcessResult::Accepted(block_hash))
+            }
+            Ok(false) => Ok(BlockProcessResult::Rejected(
+                block_hash,
+                "Block validation failed".to_string(),
+            )),
+            Err(e) => Ok(BlockProcessResult::Rejected(
+                block_hash,
+                format!("Validation error: {}", e),
+            )),
+        }
+    }
+
+    // commit validated block by updating consensus values, and execution state
+    async fn commit_validated_block(&self, block: &Block) -> Result<()> {
+        // Execute transactions and commit state changes
+        let mut block_copy = block.clone();
+        let _ = self
+            .execution_engine
+            .execute_block_commit(&mut block_copy)
+            .await?;
+
+        // Store the block to disk
+        self.store_block(&block).await?;
+
+        // Update consensus engine state
+        let mut consensus = self.consensus_engine.lock().await;
+        consensus.update_best_block(&block).await?;
+
+        println!("Blockchain: Block {} state committed", block.header.index);
+        Ok(())
+    }
+
+    // verify block builder's signature
+    fn verify_proposer_signature(
+        &self,
+        block: &Block,
+        proposer_id: &Address,
+        signature: &Signature,
+    ) -> Result<bool> {
+        if *proposer_id != block.header.proposer {
+            return Ok(false);
+        }
+
+        let block_hash = block.header.hash();
+        match signature.recover_address_from_prehash(&block_hash) {
+            Ok(recovered_address) => Ok(recovered_address == *proposer_id),
+            Err(_) => Ok(false),
+        }
+    }
+
+    // execute by simulating state changes
+    async fn validate_execution(&self, block: &Block) -> Result<bool> {
+        let mut block_copy = block.clone();
+
+        // Use simulate instead of commit (you already have this method)
+        match self
+            .execution_engine
+            .simulate_execute_block(&mut block_copy.transactions)
+            .await
+        {
+            Ok(valid_txs) => {
+                // Check if all transactions are valid
+                if valid_txs.len() != block.transactions.len() {
+                    println!("Blockchain: Some transactions failed validation");
+                    return Ok(false);
+                }
+
+                // For a complete check, you'd need a dry-run execution method
+                // that returns the state root without committing
+                Ok(true) // Simplified for now
+            }
+            Err(e) => {
+                println!("Blockchain: Transaction simulation failed: {}", e);
+                Ok(false)
+            }
+        }
+    }
+
+    ///// Validate and add block from network /////
+
+    /// 1. Consensus validation
+    /// 2. Execution transactions and validate state transition
+    /// Main block validation method (used by both network and internal validation)
+    pub async fn validate_block(&self, block: &Block) -> Result<bool> {
+        // Consensus validation
+        let consensus_valid = {
+            let consensus = self.consensus_engine.lock().await;
+            consensus.validate_block(block).await?
+        };
+
+        if !consensus_valid {
+            println!("Blockchain: Consensus validation failed");
+            return Ok(false);
+        }
+
+        // Execution validation
+        if !self.validate_execution(block).await? {
+            println!("Blockchain: Execution validation failed");
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    // Helper method
+    // Helper function to all transaction to mempool
+    pub async fn add_transaction_to_mempool(&self, transaction: &Transaction) -> Result<B256> {
+        return self.execution_engine.add_transaction(transaction).await;
+    }
 
     // call storage layer to store block
     async fn store_block(&self, block: &Block) -> Result<()> {

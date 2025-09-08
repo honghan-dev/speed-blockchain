@@ -200,7 +200,7 @@ impl ExecutionEngine {
     pub async fn add_transaction(&self, transaction: &Transaction) -> Result<B256> {
         let mut mempool = self.mempool.lock().await;
 
-        mempool.add_transaction(transaction)
+        return mempool.add_transaction(transaction);
     }
 
     // get all transaction from mempool

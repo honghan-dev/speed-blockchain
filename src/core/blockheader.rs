@@ -21,7 +21,7 @@ pub struct BlockHeader {
     pub state_root: B256,
 
     // Ethereum-style signature (65 bytes: r + s + v)
-    pub validator_signature: Option<Vec<u8>>,
+    pub validator_signature: Option<Signature>,
 }
 
 impl BlockHeader {
@@ -81,29 +81,18 @@ impl BlockHeader {
         let signature = keypair.sign_hash(&block_hash).await.unwrap();
 
         // store signature as bytes
-        self.validator_signature = Some(signature.as_bytes().to_vec());
+        self.validator_signature = Some(signature);
 
         Ok(())
     }
 
     // verify the record signature (when receiving blocks)
     pub fn verify_signature(&self) -> Result<(), SignatureError> {
-        let signature_bytes = match &self.validator_signature {
+        // After: Direct use - Signature handles all validation internally!
+        let signature = match &self.validator_signature {
             Some(sig) => sig,
             None => return Err(SignatureError::InvalidSignature),
         };
-
-        // check signature len
-        if signature_bytes.len() != 65 {
-            return Err(SignatureError::InvalidSignature);
-        };
-
-        // extract signature components
-        let r_s = &signature_bytes[0..64];
-        let v = signature_bytes[64];
-
-        // create signature
-        let signature = Signature::from_bytes_and_parity(r_s, v != 0);
 
         let block_hash = self.hash();
 

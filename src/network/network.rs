@@ -1,5 +1,4 @@
-use alloy::primitives::{Address, B256};
-use alloy_signer::Signature;
+use alloy::primitives::Address;
 use anyhow::Result;
 use libp2p::{
     Swarm, SwarmBuilder,
@@ -9,61 +8,14 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::{Block, Transaction};
+use crate::{BlockchainMessage, NetworkMessage};
 
 #[derive(NetworkBehaviour)]
 pub struct BlockchainBehaviour {
     pub gossipsub: Behaviour,         // For broadcasting messages
     pub mdns: mdns::tokio::Behaviour, // For discovering local peers
-}
-
-// Define message from network -> blockchain
-#[derive(Debug, Clone)]
-pub enum NetworkMessage {
-    NewBlock {
-        block: Block,
-        proposer_id: Address,
-        signature: Signature,
-    },
-    Attestation {
-        block_hash: B256,
-        validator_id: Address,
-        vote: AttestationVote,
-        signature: Signature,
-    },
-    NewTransaction {
-        transaction: Transaction,
-        from_peer: Address,
-    },
-}
-
-// Define blockchain -> network message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BlockchainMessage {
-    NewBlock {
-        block: Block,
-        proposer: Address,
-        signature: Signature,
-    },
-    Attestation {
-        block_hash: B256,
-        validator: Address,
-        vote: AttestationVote,
-        signature: Signature,
-    },
-    NewTransaction {
-        transaction: Transaction,
-    },
-}
-
-// simple vote type for attestation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum AttestationVote {
-    Accept,                    // Block is valid
-    Reject { reason: String }, // Block is invalid with reason
 }
 
 // Main function

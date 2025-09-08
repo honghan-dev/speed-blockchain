@@ -1,5 +1,8 @@
-use crate::{AttestationVote, Block, Blockchain, BlockchainMessage, KeyPair, NetworkMessage};
-use alloy::primitives::{Address, B256};
+use crate::{
+    Attestation, AttestationVote, Block, BlockProcessResult, Blockchain, BlockchainMessage,
+    KeyPair, NetworkMessage, Transaction, ValidatorRole,
+};
+use alloy::primitives::{Address, B256, keccak256};
 use alloy_signer::Signature;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -23,19 +26,7 @@ pub struct BlockchainService {
 
     // Simple state tracking
     pending_blocks: HashMap<B256, Block>, // Blocks waiting for attestations
-}
-
-#[derive(Debug, Clone)]
-pub enum ValidatorRole {
-    Proposer,
-    Attestor,
-}
-
-#[derive(Debug, Clone)]
-pub struct Attestation {
-    pub validator_id: Address,
-    pub vote: AttestationVote,
-    pub signature: Signature,
+    received_attestations: HashMap<B256, Vec<Attestation>>,
 }
 
 impl BlockchainService {
@@ -55,6 +46,7 @@ impl BlockchainService {
             from_network_receiver: from_network,
             to_network_sender: to_network,
             pending_blocks: HashMap::new(),
+            received_attestations: HashMap::new(),
         }
     }
 
@@ -69,7 +61,7 @@ impl BlockchainService {
                     self.handle_network_message(msg).await?;
                 }
 
-                // Periodic block proposal (for proposers only)
+                // Periodical checking whether we should propose block
                 _ = block_timer.tick() => {
                     if matches!(self.role, ValidatorRole::Proposer) {
                         self.propose_block().await?;
@@ -88,26 +80,27 @@ impl BlockchainService {
                 proposer_id,
                 signature,
             } => {
-                self.handle_received_block(&block, &proposer_id, &signature)
+                self.handle_received_block(block, proposer_id, signature)
                     .await?;
-            } // handle receiving new attestation from other nodes
-              // NetworkMessage::Attestation {
-              //     block_hash,
-              //     validator_id,
-              //     vote,
-              //     signature,
-              // } => {
-              //     self.handle_received_attestation(block_hash, validator_id, vote, signature)
-              //         .await?;
-              // }
-              // // handle receiving new transaction from other nodes
-              // NetworkMessage::NewTransaction {
-              //     transaction,
-              //     from_peer,
-              // } => {
-              //     self.handle_received_transaction(transaction, from_peer)
-              //         .await?;
-              // }
+            }
+            // handle receiving new attestation from other nodes
+            NetworkMessage::Attestation {
+                block_hash,
+                validator_id,
+                vote,
+                signature,
+            } => {
+                self.handle_received_attestation(block_hash, validator_id, vote, signature)
+                    .await?;
+            }
+            // handle receiving new transaction from other nodes
+            NetworkMessage::NewTransaction {
+                transaction,
+                from_peer,
+            } => {
+                self.handle_received_transaction(&transaction, &from_peer)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -115,41 +108,48 @@ impl BlockchainService {
     // receiving a block from network
     async fn handle_received_block(
         &mut self,
-        block: &Block,
-        proposer_id: &Address,
-        signature: &Signature,
+        block: Block,
+        proposer_id: Address,
+        signature: Signature,
     ) -> Result<()> {
         println!(
-            "Blockchain: Received block {} from {}",
-            block.header.index, proposer_id
+            "Service: Received block {}, forwarding to blockchain",
+            block.header.index
         );
 
-        // Simple validation
-        let is_valid = self.validate_block(&block).await?;
+        // early signature verification.
+        if !self.verify_block_signature(&block.header.hash(), &proposer_id, &signature)? {
+            println!(
+                "Service: Invalid block signature from {}, dropping",
+                proposer_id
+            );
+            return Ok(()); // Drop message immediately
+        }
 
-        if is_valid {
-            // Store block as pending
-            let block_hash = block.header.hash();
-            self.pending_blocks.insert(block_hash, block.clone());
+        // blockchain layer validation
+        let blockchain_result = {
+            let blockchain = self.blockchain.lock().await;
+            blockchain
+                .process_received_block(block, proposer_id, signature)
+                .await?
+        };
 
-            println!("Blockchain: Block {} validation passed", block.header.index);
-
-            // Create attestation (for attestors)
-            if matches!(self.role, ValidatorRole::Attestor) {
-                self.create_and_send_attestation(block_hash, AttestationVote::Accept)
-                    .await?;
+        // React based on blockchain's decision
+        match blockchain_result {
+            BlockProcessResult::Accepted(block_hash) => {
+                if matches!(self.role, ValidatorRole::Attestor) {
+                    self.create_and_send_attestation(block_hash, AttestationVote::Accept)
+                        .await?;
+                }
             }
-        } else {
-            println!("Blockchain: Block validation failed");
-            if matches!(self.role, ValidatorRole::Attestor) {
-                let block_hash = block.header.hash();
-                self.create_and_send_attestation(
-                    block_hash,
-                    AttestationVote::Reject {
-                        reason: "Invalid block".to_string(),
-                    },
-                )
-                .await?;
+            BlockProcessResult::Rejected(block_hash, reason) => {
+                if matches!(self.role, ValidatorRole::Attestor) {
+                    self.create_and_send_attestation(
+                        block_hash,
+                        AttestationVote::Reject { reason },
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -170,21 +170,62 @@ impl BlockchainService {
             hex::encode(block_hash)
         );
 
+        // verify attestation signature first before calling blockchain layer
+        if !self.verify_attestation_signature(&block_hash, &validator_id, &vote, &signature)? {
+            println!(
+                "Service: Invalid attestation signature from {}, ignoring",
+                validator_id
+            );
+            return Ok(());
+        }
+
         // Store attestation
         let attestation = Attestation {
             validator_id,
             vote: vote.clone(),
             signature,
         };
+
+        // update attestation received
         self.received_attestations
             .entry(block_hash)
             .or_insert_with(Vec::new)
             .push(attestation);
 
-        // Check if we can finalize block (simple: need 1 accept for 2-validator system)
-        if matches!(vote, AttestationVote::Accept) && matches!(self.role, ValidatorRole::Proposer) {
-            if let Some(block) = self.pending_blocks.remove(&block_hash) {
-                self.finalize_block(block).await?;
+        // process attestation received from other node, as a proposer
+        if matches!(self.role, ValidatorRole::Proposer) {
+            self.process_attestation_as_proposer(block_hash, vote)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    // Adding transaction received from other node to mempool
+    async fn handle_received_transaction(
+        &self,
+        transaction: &Transaction,
+        from_peer: &Address,
+    ) -> Result<()> {
+        println!(
+            "Service: Received transaction {} from peer {}",
+            hex::encode(transaction.hash),
+            from_peer
+        );
+
+        // @todo No Transaction validation
+        let blockchain = self.blockchain.lock().await;
+        let result = blockchain.add_transaction_to_mempool(&transaction).await;
+
+        match result {
+            Ok(tx_hash) => {
+                println!(
+                    "Service: Transaction {} added to mempool successfully",
+                    hex::encode(tx_hash)
+                );
+            }
+            Err(e) => {
+                println!("Service: Failed to add transaction to mempool: {}", e);
             }
         }
 
@@ -197,7 +238,7 @@ impl BlockchainService {
         let blockchain = self.blockchain.lock().await;
 
         // Use your existing blockchain validation
-        match blockchain.validate_block(block) {
+        match blockchain.validate_block(block).await {
             Ok(is_valid) => {
                 println!("Blockchain: Block validation result: {}", is_valid);
                 Ok(is_valid)
@@ -205,6 +246,103 @@ impl BlockchainService {
             Err(e) => {
                 println!("Blockchain: Block validation error: {}", e);
                 Ok(false) // Treat validation errors as invalid blocks
+            }
+        }
+    }
+
+    // propose new block
+    async fn propose_block(&mut self) -> Result<()> {
+        let new_block = match {
+            let blockchain = self.blockchain.lock().await;
+            blockchain.produce_block().await
+        } {
+            Ok(block) => block,
+            Err(_) => {
+                // Not our turn or no transactions - normal
+                return Ok(());
+            }
+        };
+
+        let block_msg = BlockchainMessage::NewBlock {
+            block: new_block.clone(),
+            proposer: self.validator_address,
+            signature: new_block
+                .header
+                .validator_signature
+                .ok_or_else(|| anyhow::anyhow!("Block header missing validator signature"))?,
+        };
+
+        self.to_network_sender
+            .send(block_msg)
+            .map_err(|_| anyhow::anyhow!("Failed to send block to network"))?;
+
+        println!("Service: Block broadcasted to network");
+        Ok(())
+    }
+
+    /// proposer handles attestation received from other nodes
+    async fn process_attestation_as_proposer(
+        &mut self,
+        block_hash: B256,
+        vote: AttestationVote,
+    ) -> Result<()> {
+        // no roll back capability, assuming our block is definitely being accepted
+        match vote {
+            AttestationVote::Accept => {
+                println!(
+                    "Service: Received ACCEPT vote for block {}",
+                    hex::encode(block_hash)
+                );
+            }
+
+            AttestationVote::Reject { reason } => {
+                println!(
+                    "Service: Received REJECT vote for block {}: {}",
+                    hex::encode(block_hash),
+                    reason
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // for attestation signature validation before calling blockchain layer
+    fn verify_attestation_signature(
+        &self,
+        block_hash: &B256,
+        validator_id: &Address,
+        vote: &AttestationVote,
+        signature: &Signature,
+    ) -> Result<bool> {
+        let message = format!("ATTEST:{}:{:?}", hex::encode(block_hash), vote);
+        self.verify_signature(&message, validator_id, signature)
+    }
+
+    // for block signature verification before calling blockchain layer
+    fn verify_block_signature(
+        &self,
+        block_hash: &B256,
+        proposer_id: &Address,
+        signature: &Signature,
+    ) -> Result<bool> {
+        let message = hex::encode(block_hash); // Blocks are signed directly on hash
+        self.verify_signature(&message, proposer_id, signature)
+    }
+
+    // generic verify signature method
+    fn verify_signature(
+        &self,
+        message: &str,
+        expected_signer: &Address,
+        signature: &Signature,
+    ) -> Result<bool> {
+        let message_hash = keccak256(message.as_bytes());
+
+        match signature.recover_address_from_prehash(&message_hash) {
+            Ok(recovered_address) => Ok(recovered_address == *expected_signer),
+            Err(_) => {
+                println!("Service: Failed to recover address from signature");
+                Ok(false)
             }
         }
     }
@@ -224,16 +362,20 @@ impl BlockchainService {
         // Create a simple attestation signature
         // In production, you'd sign the block hash + vote
         let message = format!("ATTEST:{}:{:?}", hex::encode(block_hash), vote);
-        let signature = self.keypair.sign_message(message.as_bytes()).await?;
+        // hash the message -> B256
+        let message_hash = keccak256(message.as_bytes());
+        // creates signature
+        let signature = self.keypair.sign_hash(&message_hash).await?;
 
-        // Send attestation via network
+        // instantiate attestation msg
         let attestation_msg = BlockchainMessage::Attestation {
             block_hash,
             validator: self.validator_address,
             vote,
-            signature,
+            signature: signature,
         };
 
+        // Send attestation via network
         self.to_network_sender
             .send(attestation_msg)
             .map_err(|_| anyhow::anyhow!("Failed to send attestation to network"))?;
